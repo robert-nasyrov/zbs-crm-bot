@@ -37,6 +37,14 @@ class AddContent(StatesGroup):
     description = State()
 
 
+class EditContent(StatesGroup):
+    date = State()
+    time = State()
+    assignee = State()
+    title = State()
+    description = State()
+
+
 # ==================== Helpers ====================
 
 STATUS_EMOJI = {
@@ -277,10 +285,10 @@ async def content_my(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==================== Edit Content Status ====================
+# ==================== Edit Content ====================
 
 @router.callback_query(F.data.startswith("cedit:"))
-async def content_edit(callback: CallbackQuery):
+async def content_edit(callback: CallbackQuery, state: FSMContext):
     content_id = int(callback.data.split(":")[1])
     
     async with async_session() as session:
@@ -295,26 +303,188 @@ async def content_edit(callback: CallbackQuery):
         await callback.answer("Контент не найден", show_alert=True)
         return
     
+    time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "не указано"
+    
     text = (
         f"📄 <b>{c.title}</b>\n\n"
         f"Тип: {TYPE_EMOJI.get(c.content_type, '📄')} {c.content_type.value}\n"
         f"Платформа: {PLATFORM_EMOJI.get(c.platform, '🌐')} {c.platform.value}\n"
-        f"Дата: {c.scheduled_date.strftime('%d.%m.%Y')}\n"
+        f"📅 Дата: {c.scheduled_date.strftime('%d.%m.%Y')}\n"
+        f"🕐 Время: {time_str}\n"
         f"Статус: {STATUS_EMOJI.get(c.status, '❓')} {c.status.value}\n"
     )
     if c.assignee:
-        text += f"Ответственный: {c.assignee.full_name}\n"
+        text += f"👤 Ответственный: {c.assignee.full_name}\n"
+    else:
+        text += f"👤 Ответственный: не назначен\n"
     if c.project:
         text += f"Проект: {c.project.emoji} {c.project.name}\n"
     if c.description:
         text += f"\n📎 {c.description}\n"
     
-    text += "\n<b>Изменить статус:</b>"
+    text += "\n<b>Что изменить?</b>"
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📅 Дату", callback_data=f"cedit_date:{content_id}"),
+        InlineKeyboardButton(text="🕐 Время", callback_data=f"cedit_time:{content_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="👤 Ответственного", callback_data=f"cedit_assign:{content_id}"),
+        InlineKeyboardButton(text="📊 Статус", callback_data=f"cedit_status:{content_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="✏️ Название", callback_data=f"cedit_title:{content_id}"),
+        InlineKeyboardButton(text="📝 Описание", callback_data=f"cedit_desc:{content_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"cedit_delete:{content_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀️ Назад", callback_data="content:today"),
+    )
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+# --- Edit Date ---
+
+@router.callback_query(F.data.startswith("cedit_date:"))
+async def cedit_date(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_content_id=content_id)
+    await state.set_state(EditContent.date)
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
+    today = date.today()
+    builder = InlineKeyboardBuilder()
+    for i in range(7):
+        d = today + timedelta(days=i)
+        weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        label = "Сегодня" if i == 0 else "Завтра" if i == 1 else f"{weekdays[d.weekday()]} {d.strftime('%d.%m')}"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"enewdate:{d.isoformat()}"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cedit:{content_id}"))
+    
+    await callback.message.edit_text("📅 Выбери новую дату:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("enewdate:"), EditContent.date)
+async def cedit_date_save(callback: CallbackQuery, state: FSMContext):
+    date_str = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.scheduled_date = date.fromisoformat(date_str)
+            await session.commit()
+    
+    await callback.answer(f"✅ Дата изменена: {date_str}", show_alert=True)
+    callback.data = f"cedit:{content_id}"
+    await content_edit(callback, state)
+
+
+# --- Edit Time ---
+
+@router.callback_query(F.data.startswith("cedit_time:"))
+async def cedit_time(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_content_id=content_id)
+    await state.set_state(EditContent.time)
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
+    builder = InlineKeyboardBuilder()
+    times = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    for i in range(0, len(times), 3):
+        row = [InlineKeyboardButton(text=t, callback_data=f"enewtime:{t}") for t in times[i:i+3]]
+        builder.row(*row)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cedit:{content_id}"))
+    
+    await callback.message.edit_text("🕐 Выбери новое время:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("enewtime:"), EditContent.time)
+async def cedit_time_save(callback: CallbackQuery, state: FSMContext):
+    time_str = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    from datetime import time as dt_time
+    h, m = map(int, time_str.split(":"))
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.scheduled_time = dt_time(h, m)
+            await session.commit()
+    
+    await callback.answer(f"✅ Время изменено: {time_str}", show_alert=True)
+    callback.data = f"cedit:{content_id}"
+    await content_edit(callback, state)
+
+
+# --- Edit Assignee ---
+
+@router.callback_query(F.data.startswith("cedit_assign:"))
+async def cedit_assign(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_content_id=content_id)
+    await state.set_state(EditContent.assignee)
+    
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.is_active == True).order_by(User.full_name))
+        users = result.scalars().all()
     
     await callback.message.edit_text(
-        text,
-        reply_markup=content_status_kb(content_id),
-        parse_mode="HTML"
+        "👤 Выбери нового ответственного:",
+        reply_markup=user_select_kb(users, "enewassign")
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("enewassign:"), EditContent.assignee)
+async def cedit_assign_save(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":")[1]
+    assignee_id = None if val == "skip" else int(val)
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.assignee_id = assignee_id
+            await session.commit()
+    
+    await callback.answer("✅ Ответственный изменён", show_alert=True)
+    callback.data = f"cedit:{content_id}"
+    await content_edit(callback, state)
+
+
+# --- Edit Status ---
+
+@router.callback_query(F.data.startswith("cedit_status:"))
+async def cedit_status(callback: CallbackQuery):
+    content_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        "📊 Выбери новый статус:",
+        reply_markup=content_status_kb(content_id)
     )
     await callback.answer()
 
@@ -339,6 +509,118 @@ async def content_change_status(callback: CallbackQuery):
     
     # Refresh today view
     await content_today(callback)
+
+
+# --- Edit Title ---
+
+@router.callback_query(F.data.startswith("cedit_title:"))
+async def cedit_title(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_content_id=content_id)
+    await state.set_state(EditContent.title)
+    await callback.message.edit_text("✏️ Введи новое название:")
+    await callback.answer()
+
+
+@router.message(EditContent.title)
+async def cedit_title_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.title = message.text
+            await session.commit()
+    
+    await message.answer(f"✅ Название изменено: <b>{message.text}</b>", parse_mode="HTML", reply_markup=content_menu_kb())
+
+
+# --- Edit Description ---
+
+@router.callback_query(F.data.startswith("cedit_desc:"))
+async def cedit_desc(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(edit_content_id=content_id)
+    await state.set_state(EditContent.description)
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗑 Убрать описание", callback_data="edesc_clear"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cedit:{content_id}"))
+    
+    await callback.message.edit_text("📝 Введи новое описание:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edesc_clear", EditContent.description)
+async def cedit_desc_clear(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.description = None
+            await session.commit()
+    
+    await callback.answer("✅ Описание удалено", show_alert=True)
+    callback.data = f"cedit:{content_id}"
+    await content_edit(callback, state)
+
+
+@router.message(EditContent.description)
+async def cedit_desc_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    content_id = data["edit_content_id"]
+    await state.clear()
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            c.description = message.text
+            await session.commit()
+    
+    await message.answer("✅ Описание обновлено", reply_markup=content_menu_kb())
+
+
+# --- Delete Content ---
+
+@router.callback_query(F.data.startswith("cedit_delete:"))
+async def cedit_delete(callback: CallbackQuery):
+    content_id = int(callback.data.split(":")[1])
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"cdelete_yes:{content_id}"),
+        InlineKeyboardButton(text="❌ Нет", callback_data=f"cedit:{content_id}"),
+    )
+    
+    await callback.message.edit_text("🗑 <b>Точно удалить?</b>\nЭто действие нельзя отменить.", reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cdelete_yes:"))
+async def cedit_delete_confirm(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    
+    async with async_session() as session:
+        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        c = result.scalar_one_or_none()
+        if c:
+            await session.delete(c)
+            await session.commit()
+    
+    await callback.answer("🗑 Удалено", show_alert=True)
+    await callback.message.edit_text("🗑 Контент удалён", reply_markup=content_menu_kb())
 
 
 # ==================== Add Content ====================
