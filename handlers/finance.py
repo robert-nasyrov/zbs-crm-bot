@@ -20,6 +20,17 @@ from keyboards import (
 
 router = Router()
 
+# Users who can see finances
+FINANCE_ACCESS = {"nasyrov_robert", "madvadps", "sarikyusupov", "n_syuzi"}
+
+
+async def check_finance_access(callback: CallbackQuery) -> bool:
+    username = (callback.from_user.username or "").lower()
+    if username not in FINANCE_ACCESS:
+        await callback.answer("⛔ Нет доступа к финансам", show_alert=True)
+        return False
+    return True
+
 
 # ==================== FSM States ====================
 
@@ -35,6 +46,8 @@ class AddFinance(StatesGroup):
 
 @router.callback_query(F.data == "menu:finance")
 async def finance_menu(callback: CallbackQuery, state: FSMContext):
+    if not await check_finance_access(callback):
+        return
     await state.clear()
     
     # Quick summary
@@ -74,6 +87,8 @@ async def finance_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "fin:add_income")
 async def fin_add_income(callback: CallbackQuery, state: FSMContext):
+    if not await check_finance_access(callback):
+        return
     await state.update_data(fin_type=FinanceType.INCOME.value)
     await state.set_state(AddFinance.amount)
     await callback.message.edit_text("💵 <b>Новый приход</b>\n\nСумма в USD:", parse_mode="HTML")
@@ -84,6 +99,8 @@ async def fin_add_income(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "fin:add_expense")
 async def fin_add_expense(callback: CallbackQuery, state: FSMContext):
+    if not await check_finance_access(callback):
+        return
     await state.update_data(fin_type=FinanceType.EXPENSE.value)
     await state.set_state(AddFinance.amount)
     await callback.message.edit_text("💸 <b>Новый расход</b>\n\nСумма в USD:", parse_mode="HTML")
@@ -205,6 +222,8 @@ async def _save_finance(message: Message, state: FSMContext, callback: CallbackQ
 
 @router.callback_query(F.data == "fin:month")
 async def fin_month(callback: CallbackQuery):
+    if not await check_finance_access(callback):
+        return
     today = date.today()
     month_start = today.replace(day=1)
     

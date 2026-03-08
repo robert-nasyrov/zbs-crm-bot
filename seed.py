@@ -18,7 +18,7 @@ from sqlalchemy import select, text
 TEAM = [
     # (telegram_id, username, full_name, role)
     # Admins
-    (271065518, "robertuzmedia", "Роберт", UserRole.ADMIN),
+    (271065518, "nasyrov_robert", "Роберт", UserRole.ADMIN),
     
     # Priority content team (календарь в первую очередь)
     (None, "madvadps", "Вадим", UserRole.ADMIN),          # Основатель, подкаст, новости
@@ -33,7 +33,7 @@ TEAM = [
     (None, "Guaho13", "Стас", UserRole.MEMBER),               # Звукорежиссёр
     
     # Management
-    (None, None, "Сусанна", UserRole.ADMIN),                  # Коммерческий директор / финансы
+    (None, "n_syuzi", "Сусанна", UserRole.ADMIN),                  # Коммерческий директор / финансы
     (None, None, "Лазиза", UserRole.MEMBER),                  # Ассистент / менеджер по продажам
     (None, None, "Нигина", UserRole.MEMBER),                   # Переводчик + SMM
     (None, None, "Самвел", UserRole.MEMBER),                   # Координатор блогеров
