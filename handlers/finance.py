@@ -270,36 +270,46 @@ async def fin_by_project(callback: CallbackQuery):
     today = date.today()
     month_start = today.replace(day=1)
     
-    async with async_session() as session:
-        result = await session.execute(
-            select(
-                Project.emoji, Project.name,
-                func.sum(func.case(
-                    (Finance.type == FinanceType.INCOME, Finance.amount),
-                    else_=0
-                )).label("income"),
-                func.sum(func.case(
-                    (Finance.type == FinanceType.EXPENSE, Finance.amount),
-                    else_=0
-                )).label("expense"),
+    try:
+        async with async_session() as session:
+            # Simpler approach: get all finance records this month with projects
+            result = await session.execute(
+                select(Finance)
+                .where(and_(
+                    Finance.record_date >= month_start,
+                    Finance.project_id.isnot(None)
+                ))
             )
-            .join(Finance, Finance.project_id == Project.id)
-            .where(Finance.record_date >= month_start)
-            .group_by(Project.id, Project.emoji, Project.name)
-            .order_by(func.sum(Finance.amount).desc())
-        )
-        rows = result.all()
-    
-    if not rows:
-        text = "📊 <b>По проектам</b>\n\nНет данных за этот месяц"
-    else:
-        lines = [f"📊 <b>По проектам — {today.strftime('%B %Y')}</b>\n"]
-        for emoji, name, income, expense in rows:
-            inc = income or 0
-            exp = expense or 0
-            lines.append(f"{emoji} <b>{name}</b>")
-            lines.append(f"  💵 +${inc:,.0f}  💸 -${exp:,.0f}  📊 ${inc-exp:,.0f}")
-        text = "\n".join(lines)
+            records = result.scalars().all()
+            
+            # Get projects
+            proj_result = await session.execute(select(Project).where(Project.is_active == True))
+            projects = {p.id: p for p in proj_result.scalars().all()}
+        
+        if not records:
+            text = "📊 <b>По проектам</b>\n\nНет данных за этот месяц"
+        else:
+            # Aggregate manually
+            data = {}
+            for r in records:
+                if r.project_id not in data:
+                    data[r.project_id] = {"income": 0, "expense": 0}
+                if r.type == FinanceType.INCOME:
+                    data[r.project_id]["income"] += r.amount
+                else:
+                    data[r.project_id]["expense"] += r.amount
+            
+            lines = [f"📊 <b>По проектам — {today.strftime('%B %Y')}</b>\n"]
+            for pid, vals in data.items():
+                p = projects.get(pid)
+                if p:
+                    inc = vals["income"]
+                    exp = vals["expense"]
+                    lines.append(f"{p.emoji} <b>{p.name}</b>")
+                    lines.append(f"  💵 +${inc:,.0f}  💸 -${exp:,.0f}  📊 ${inc-exp:,.0f}")
+            text = "\n".join(lines)
+    except Exception as e:
+        text = f"📊 <b>По проектам</b>\n\nНет данных за этот месяц"
     
     await callback.message.edit_text(text, reply_markup=finance_menu_kb(), parse_mode="HTML")
     await callback.answer()

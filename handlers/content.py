@@ -455,7 +455,7 @@ async def content_add_date(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("ctime:"), AddContent.time)
 async def content_add_time(callback: CallbackQuery, state: FSMContext):
-    val = callback.data.split(":")[1]
+    val = callback.data.split(":", 1)[1]  # "08:00" or "skip"
     scheduled_time = None if val == "skip" else val
     await state.update_data(scheduled_time=scheduled_time)
     await state.set_state(AddContent.description)
