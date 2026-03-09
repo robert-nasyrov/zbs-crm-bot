@@ -192,8 +192,6 @@ class TaskAttachment(Base):
     # Relationships
     content = relationship("ContentPlan", backref="attachments")
     uploader = relationship("User", foreign_keys=[uploaded_by])
-        Index("idx_ca_user", "user_id"),
-    )
 
 
 class ContentPlan(Base):
