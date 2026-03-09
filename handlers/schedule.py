@@ -68,6 +68,12 @@ class EditSchedule(StatesGroup):
     description = State()
 
 
+class Reschedule(StatesGroup):
+    date = State()
+    time = State()
+    reason = State()
+
+
 # ==================== Schedule Menu ====================
 
 def schedule_menu_kb():
@@ -449,7 +455,7 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
 # ==================== Edit ====================
 
 @router.callback_query(F.data.startswith("sedit:"))
-async def sched_edit(callback: CallbackQuery, state: FSMContext):
+async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
     content_id = int(callback.data.split(":")[1])
     
     async with async_session() as session:
@@ -459,10 +465,17 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext):
             .where(ContentPlan.id == content_id)
         )
         c = result.scalar_one_or_none()
+        
+        # Get current user
+        user_r = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+        current_user = user_r.scalar_one_or_none()
     
     if not c:
         await callback.answer("Не найдено", show_alert=True)
         return
+    
+    is_admin = current_user and current_user.role in (UserRole.ADMIN, UserRole.MANAGER)
+    is_assignee = current_user and c.assignee_id == current_user.id
     
     time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "не указано"
     weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -478,33 +491,48 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext):
         text += f"📁 {c.project.emoji} {c.project.name}\n"
     if c.description:
         text += f"\n📎 {c.description}\n"
-    text += "\n<b>Что изменить?</b>"
     
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📅 Дату", callback_data=f"sed_date:{content_id}"),
-        InlineKeyboardButton(text="🕐 Время", callback_data=f"sed_time:{content_id}"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="👤 Ответственного", callback_data=f"sed_assign:{content_id}"),
-        InlineKeyboardButton(text="✏️ Название", callback_data=f"sed_title:{content_id}"),
-    )
-    # Status quick buttons
-    builder.row(
-        InlineKeyboardButton(text="🔄 В работе", callback_data=f"sst:{content_id}:progress"),
-        InlineKeyboardButton(text="✅ Готово", callback_data=f"sst:{content_id}:published"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="❌ Отменить", callback_data=f"sst:{content_id}:cancelled"),
-        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"sed_del:{content_id}"),
-    )
+    
+    if is_admin:
+        # Admin: full control
+        text += "\n<b>Что изменить?</b>"
+        builder.row(
+            InlineKeyboardButton(text="📅 Дату", callback_data=f"sed_date:{content_id}"),
+            InlineKeyboardButton(text="🕐 Время", callback_data=f"sed_time:{content_id}"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="👤 Ответственного", callback_data=f"sed_assign:{content_id}"),
+            InlineKeyboardButton(text="✏️ Название", callback_data=f"sed_title:{content_id}"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🔄 В работе", callback_data=f"sst:{content_id}:progress"),
+            InlineKeyboardButton(text="✅ Готово", callback_data=f"sst:{content_id}:published"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"sst:{content_id}:cancelled"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"sed_del:{content_id}"),
+        )
+    elif is_assignee:
+        # Assignee: status + reschedule with reason
+        text += "\n<b>Действия:</b>"
+        builder.row(
+            InlineKeyboardButton(text="🔄 В работе", callback_data=f"sst:{content_id}:progress"),
+            InlineKeyboardButton(text="✅ Готово", callback_data=f"sst:{content_id}:published"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{content_id}"),
+        )
+    else:
+        text += "\n<i>Только просмотр</i>"
+    
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="sched:today"))
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
 
 
-# --- Quick Status Change ---
+# --- Quick Status Change (notifies admins) ---
 
 @router.callback_query(F.data.startswith("sst:"))
 async def sched_status(callback: CallbackQuery):
@@ -513,15 +541,158 @@ async def sched_status(callback: CallbackQuery):
     new_status = ContentStatus(parts[2])
     
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        result = await session.execute(
+            select(ContentPlan)
+            .options(selectinload(ContentPlan.assignee))
+            .where(ContentPlan.id == content_id)
+        )
         c = result.scalar_one_or_none()
         if c:
             c.status = new_status
             await session.commit()
+            
+            # Notify admins if assignee changed status
+            if c.assignee and c.assignee.telegram_id == callback.from_user.id:
+                import os
+                admin_ids = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+                status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
+                notify = (
+                    f"📋 <b>{c.assignee.full_name}</b> обновил задачу:\n\n"
+                    f"<b>{c.title}</b>\n"
+                    f"Статус: {status_text}"
+                )
+                for aid in admin_ids:
+                    if aid != callback.from_user.id:
+                        try:
+                            await callback.message.bot.send_message(aid, notify, parse_mode="HTML")
+                        except Exception:
+                            pass
     
     await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Готово!", show_alert=True)
     callback.data = f"sedit:{content_id}"
     await sched_edit(callback)
+
+
+# --- Reschedule (assignee picks date + time + writes reason, admins notified) ---
+
+@router.callback_query(F.data.startswith("resched:"))
+async def resched_start(callback: CallbackQuery, state: FSMContext):
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(resched_id=content_id)
+    await state.set_state(Reschedule.date)
+    
+    today = date.today()
+    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    builder = InlineKeyboardBuilder()
+    for i in range(21):
+        d = today + timedelta(days=i)
+        label = "Сегодня" if i == 0 else "Завтра" if i == 1 else f"{weekdays[d.weekday()]} {d.strftime('%d.%m')}"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"rsdate:{d.isoformat()}"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"sedit:{content_id}"))
+    
+    await callback.message.edit_text("📆 <b>Перенести на какой день?</b>", reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rsdate:"), Reschedule.date)
+async def resched_date(callback: CallbackQuery, state: FSMContext):
+    date_str = callback.data.split(":", 1)[1]
+    await state.update_data(new_date=date_str)
+    await state.set_state(Reschedule.time)
+    
+    builder = InlineKeyboardBuilder()
+    times = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00",
+             "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    for i in range(0, len(times), 3):
+        row = [InlineKeyboardButton(text=t, callback_data=f"rstime:{t}") for t in times[i:i+3]]
+        builder.row(*row)
+    builder.row(InlineKeyboardButton(text="⏭ Оставить как было", callback_data="rstime:keep"))
+    
+    await callback.message.edit_text("🕐 Новое время:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rstime:"), Reschedule.time)
+async def resched_time(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
+    await state.update_data(new_time=val)
+    await state.set_state(Reschedule.reason)
+    
+    await callback.message.edit_text("📝 <b>Причина переноса:</b>\n\nНапиши почему переносишь", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(Reschedule.reason)
+async def resched_reason(message: Message, state: FSMContext):
+    reason = message.text
+    data = await state.get_data()
+    content_id = data["resched_id"]
+    new_date_str = data["new_date"]
+    new_time_val = data.get("new_time")
+    await state.clear()
+    
+    new_date = date.fromisoformat(new_date_str)
+    new_time = None
+    
+    async with async_session() as session:
+        result = await session.execute(
+            select(ContentPlan)
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+            .where(ContentPlan.id == content_id)
+        )
+        c = result.scalar_one_or_none()
+        if not c:
+            await message.answer("❌ Задача не найдена")
+            return
+        
+        old_date = c.scheduled_date.strftime("%d.%m")
+        old_time = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+        
+        c.scheduled_date = new_date
+        
+        if new_time_val and new_time_val != "keep":
+            h, m = map(int, new_time_val.split(":"))
+            c.scheduled_time = dt_time(h, m)
+            new_time = new_time_val
+        else:
+            new_time = old_time
+        
+        # Add reason to description
+        old_desc = c.description or ""
+        timestamp = datetime.now().strftime("%d.%m %H:%M")
+        assignee_name = c.assignee.full_name if c.assignee else "?"
+        reschedule_note = f"\n⏩ Перенос ({timestamp}) {assignee_name}: {reason}"
+        c.description = (old_desc + reschedule_note).strip()
+        
+        await session.commit()
+        
+        # Notify admins
+        import os
+        admin_ids = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+        
+        weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        new_day = weekdays[new_date.weekday()]
+        
+        notify = (
+            f"📆 <b>Перенос задачи</b>\n\n"
+            f"<b>{c.title}</b>\n"
+            f"👤 {assignee_name}\n\n"
+            f"Было: {old_date} {old_time}\n"
+            f"Стало: <b>{new_day} {new_date.strftime('%d.%m')} {new_time}</b>\n\n"
+            f"💬 Причина: <i>{reason}</i>"
+        )
+        
+        for aid in admin_ids:
+            if aid != message.from_user.id:
+                try:
+                    await message.bot.send_message(aid, notify, parse_mode="HTML")
+                except Exception:
+                    pass
+    
+    await message.answer(
+        f"✅ Задача перенесена на {new_date.strftime('%d.%m')} {new_time}\n\n💬 {reason}",
+        reply_markup=schedule_menu_kb()
+    )
 
 
 # --- Edit Date ---
