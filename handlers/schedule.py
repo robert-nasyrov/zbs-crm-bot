@@ -70,8 +70,7 @@ class EditSchedule(StatesGroup):
 
 # ==================== Schedule Menu ====================
 
-def schedule_menu_kb() -> InlineKeyboardMarkup:
-    from aiogram.types import InlineKeyboardMarkup
+def schedule_menu_kb():
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="📆 Сегодня", callback_data="sched:today"),
