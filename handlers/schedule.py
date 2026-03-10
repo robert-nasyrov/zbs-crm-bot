@@ -34,6 +34,43 @@ STATUS_EMOJI = {
 }
 
 
+def nav_kb(content_id: int = None):
+    """Standard navigation keyboard"""
+    builder = InlineKeyboardBuilder()
+    if content_id:
+        builder.row(
+            InlineKeyboardButton(text="📄 К задаче", callback_data=f"sedit:{content_id}"),
+            InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
+        )
+    else:
+        builder.row(InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"))
+    builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+async def notify_task_people(bot, task, exclude_tg_id: int, text: str, kb=None):
+    """Send notification to creator + all assignees (except exclude_tg_id)"""
+    notified = set()
+    
+    # Creator
+    if task.creator and task.creator.telegram_id and task.creator.telegram_id != 0:
+        if task.creator.telegram_id != exclude_tg_id:
+            notified.add(task.creator.telegram_id)
+    
+    # All assignees
+    users = task.assignees if task.assignees else ([task.assignee] if task.assignee else [])
+    for u in users:
+        if u and u.telegram_id and u.telegram_id != 0 and u.telegram_id != exclude_tg_id:
+            notified.add(u.telegram_id)
+    
+    reply_markup = kb if kb else nav_kb(task.id)
+    for tg_id in notified:
+        try:
+            await bot.send_message(tg_id, text, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception as e:
+            print(f"Notify failed {tg_id}: {e}")
+
+
 def format_item(c, show_assignee: bool = True) -> str:
     status = STATUS_EMOJI.get(c.status, "⬜")
     time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
@@ -617,10 +654,10 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
     
     target = callback.message if callback else message
     if callback:
-        await target.edit_text(text, reply_markup=schedule_menu_kb(), parse_mode="HTML")
+        await target.edit_text(text, reply_markup=nav_kb(item.id), parse_mode="HTML")
         await callback.answer()
     else:
-        await target.answer(text, reply_markup=schedule_menu_kb(), parse_mode="HTML")
+        await target.answer(text, reply_markup=nav_kb(item.id), parse_mode="HTML")
 
 
 # ==================== Edit ====================
@@ -753,66 +790,35 @@ async def sched_status(callback: CallbackQuery):
             status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
             
             if new_status == ContentStatus.PUBLISHED:
-                # Task completed — notify creator
-                menu_kb = InlineKeyboardBuilder()
-                menu_kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
-                
-                done_text = (
+                notify_text = (
                     f"✅ <b>Задача выполнена!</b>\n\n"
                     f"<b>{c.title}</b>\n"
-                    f"👤 {who}\n\n"
-                    f"Задача закрыта."
+                    f"👤 {who}"
                 )
-                
-                # Notify creator
-                if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
-                    try:
-                        await bot.send_message(c.creator.telegram_id, done_text, reply_markup=menu_kb.as_markup(), parse_mode="HTML")
-                    except Exception:
-                        pass
-                
-                # Notify all assignees (except the one who completed)
-                users_to_notify = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
-                for u in users_to_notify:
-                    if u and u.telegram_id and u.telegram_id != 0 and u.telegram_id != callback.from_user.id:
-                        if not (c.creator and u.telegram_id == c.creator.telegram_id):  # don't double-notify creator
-                            try:
-                                await bot.send_message(u.telegram_id, done_text, reply_markup=menu_kb.as_markup(), parse_mode="HTML")
-                            except Exception:
-                                pass
             else:
-                # Other status — notify creator only
-                if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
-                    notify = (
-                        f"📋 <b>{who}</b> обновил задачу:\n\n"
-                        f"<b>{c.title}</b>\n"
-                        f"Статус: {status_text}"
-                    )
-                    try:
-                        await bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
-                    except Exception:
-                        pass
+                notify_text = (
+                    f"📋 <b>{who}</b> обновил статус:\n\n"
+                    f"<b>{c.title}</b>\n"
+                    f"Статус: {status_text}"
+                )
+            
+            await notify_task_people(bot, c, callback.from_user.id, notify_text)
     
+    # Show to the person who changed
+    status_label = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
     if new_status == ContentStatus.PUBLISHED:
-        # Show completion message to the person who completed it
-        menu_kb_self = InlineKeyboardBuilder()
-        menu_kb_self.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
         await callback.message.edit_text(
             f"✅ <b>Задача выполнена!</b>\n\n<b>{c.title if c else ''}</b>\n\nОтличная работа!",
-            reply_markup=menu_kb_self.as_markup(),
+            reply_markup=nav_kb(),
             parse_mode="HTML"
         )
-        await callback.answer()
     else:
-        status_label = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
-        menu_kb_s = InlineKeyboardBuilder()
-        menu_kb_s.row(InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"))
         await callback.message.edit_text(
             f"{status_label}\n\n<b>{c.title if c else ''}</b>",
-            reply_markup=menu_kb_s.as_markup(),
+            reply_markup=nav_kb(content_id),
             parse_mode="HTML"
         )
-        await callback.answer()
+    await callback.answer()
 
 
 # --- Reschedule (assignee picks date + time + writes reason, admins notified) ---
@@ -908,7 +914,7 @@ async def resched_reason(message: Message, state: FSMContext):
         
         await session.commit()
         
-        # Notify task creator (not yourself)
+        # Notify creator + all assignees
         weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
         new_day = weekdays[new_date.weekday()]
         
@@ -921,15 +927,11 @@ async def resched_reason(message: Message, state: FSMContext):
             f"💬 Причина: <i>{reason}</i>"
         )
         
-        if c.creator and c.creator.telegram_id and c.creator.telegram_id != message.from_user.id:
-            try:
-                await message.bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
-            except Exception:
-                pass
+        await notify_task_people(message.bot, c, message.from_user.id, notify)
     
     await message.answer(
         f"✅ Задача перенесена на {new_date.strftime('%d.%m')} {new_time}\n\n💬 {reason}",
-        reply_markup=schedule_menu_kb()
+        reply_markup=nav_kb()
     )
 
 
@@ -962,13 +964,20 @@ async def sed_date_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == cid))
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
+            .where(ContentPlan.id == cid)
+        )
         c = result.scalar_one_or_none()
         if c:
             c.scheduled_date = date.fromisoformat(date_str)
             await session.commit()
+            
+            who = callback.from_user.full_name
+            notify = f"📅 <b>{who}</b> изменил дату:\n\n<b>{c.title}</b>\nНовая дата: <b>{date_str}</b>"
+            await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
-    await callback.message.edit_text(f"✅ Дата изменена: <b>{date_str}</b>", reply_markup=schedule_menu_kb(), parse_mode="HTML")
+    await callback.message.edit_text(f"✅ Дата изменена: <b>{date_str}</b>", reply_markup=nav_kb(cid), parse_mode="HTML")
     await callback.answer()
 
 
@@ -1001,13 +1010,20 @@ async def sed_time_save(callback: CallbackQuery, state: FSMContext):
     
     h, m = map(int, time_str.split(":"))
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == cid))
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
+            .where(ContentPlan.id == cid)
+        )
         c = result.scalar_one_or_none()
         if c:
             c.scheduled_time = dt_time(h, m)
             await session.commit()
+            
+            who = callback.from_user.full_name
+            notify = f"🕐 <b>{who}</b> изменил время:\n\n<b>{c.title}</b>\nНовое время: <b>{time_str}</b>"
+            await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
-    await callback.message.edit_text(f"✅ Время изменено: <b>{time_str}</b>", reply_markup=schedule_menu_kb(), parse_mode="HTML")
+    await callback.message.edit_text(f"✅ Время изменено: <b>{time_str}</b>", reply_markup=nav_kb(cid), parse_mode="HTML")
     await callback.answer()
 
 
@@ -1123,7 +1139,7 @@ async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
                         except Exception:
                             pass
     
-    await callback.message.edit_text("✅ Ответственные обновлены", reply_markup=schedule_menu_kb())
+    await callback.message.edit_text("✅ Ответственные обновлены", reply_markup=nav_kb(cid))
     await callback.answer()
 
 
@@ -1145,13 +1161,21 @@ async def sed_title_save(message: Message, state: FSMContext):
     await state.clear()
     
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == cid))
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
+            .where(ContentPlan.id == cid)
+        )
         c = result.scalar_one_or_none()
         if c:
+            old_title = c.title
             c.title = message.text
             await session.commit()
+            
+            who = message.from_user.full_name
+            notify = f"✏️ <b>{who}</b> переименовал задачу:\n\n<s>{old_title}</s>\n→ <b>{message.text}</b>"
+            await notify_task_people(message.bot, c, message.from_user.id, notify)
     
-    await message.answer(f"✅ Название: <b>{message.text}</b>", parse_mode="HTML", reply_markup=schedule_menu_kb())
+    await message.answer(f"✅ Название: <b>{message.text}</b>", parse_mode="HTML", reply_markup=nav_kb(cid))
 
 
 # --- Delete ---
@@ -1172,14 +1196,21 @@ async def sed_delete(callback: CallbackQuery):
 async def sed_delete_confirm(callback: CallbackQuery):
     content_id = int(callback.data.split(":")[1])
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == content_id))
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
+            .where(ContentPlan.id == content_id)
+        )
         c = result.scalar_one_or_none()
         if c:
+            who = callback.from_user.full_name
+            notify = f"🗑 <b>{who}</b> удалил задачу:\n\n<s>{c.title}</s>"
+            await notify_task_people(callback.message.bot, c, callback.from_user.id, notify, nav_kb())
+            
             await session.delete(c)
             await session.commit()
     
     await callback.answer()
-    await callback.message.edit_text("🗑 Задача удалена", reply_markup=schedule_menu_kb())
+    await callback.message.edit_text("🗑 Задача удалена", reply_markup=nav_kb())
 
 
 # ==================== Attachments ====================
@@ -1312,11 +1343,11 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     if not files:
-        await callback.message.edit_text("📎 Ничего не прикреплено", reply_markup=schedule_menu_kb())
+        await callback.message.edit_text("📎 Ничего не прикреплено", reply_markup=nav_kb())
         await callback.answer()
         return
     
-    # Get uploader
+    # Get uploader and notify
     async with async_session() as session:
         user_r = await session.execute(select(User.id).where(User.telegram_id == callback.from_user.id))
         uploader_id = user_r.scalar_one_or_none()
@@ -1329,10 +1360,26 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
                 uploaded_by=uploader_id,
             ))
         await session.commit()
+        
+        # Notify everyone about new attachments
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
+            .where(ContentPlan.id == content_id)
+        )
+        c = result.scalar_one_or_none()
+        if c:
+            who = callback.from_user.full_name
+            type_counts = {}
+            for mf in files:
+                type_counts[mf["type"]] = type_counts.get(mf["type"], 0) + 1
+            type_emoji = {"photo": "📷", "voice": "🎤", "video": "🎬", "video_note": "⭕", "document": "📄"}
+            types_str = ", ".join(f"{type_emoji.get(t, '📎')}{n}" for t, n in type_counts.items())
+            
+            notify = f"📎 <b>{who}</b> добавил вложения к задаче:\n\n<b>{c.title}</b>\n{types_str}"
+            await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
-    await callback.message.edit_text(f"✅ {len(files)} вложений сохранено", reply_markup=schedule_menu_kb())
+    await callback.message.edit_text(f"✅ {len(files)} вложений сохранено", reply_markup=nav_kb(content_id))
     await callback.answer()
-    await sched_edit(callback)
 
 
 # ==================== Cancel ====================
@@ -1342,5 +1389,5 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "tasks:cancel")
 async def sched_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("❌ Отменено", reply_markup=schedule_menu_kb())
+    await callback.message.edit_text("❌ Отменено", reply_markup=nav_kb())
     await callback.answer()
