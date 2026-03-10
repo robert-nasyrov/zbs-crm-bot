@@ -365,7 +365,10 @@ async def _show_user_picker(target, state: FSMContext, is_callback: bool = True)
             label += f" (@{u.username})"
         builder.row(InlineKeyboardButton(text=label, callback_data=f"stoggle:{u.id}"))
     builder.row(InlineKeyboardButton(text="✔️ Готово", callback_data="sassign:done"))
-    builder.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data="sassign:skip"))
+    builder.row(
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data="sassign:skip"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+    )
     
     count = len(selected)
     text = f"👤 Ответственные ({count} выбрано):\nНажми на имя чтобы выбрать/убрать"
@@ -447,7 +450,10 @@ async def sched_add_date(callback: CallbackQuery, state: FSMContext):
     for i in range(0, len(times), 3):
         row = [InlineKeyboardButton(text=t, callback_data=f"stime:{t}") for t in times[i:i+3]]
         builder.row(*row)
-    builder.row(InlineKeyboardButton(text="⏭ Без времени", callback_data="stime:skip"))
+    builder.row(
+        InlineKeyboardButton(text="⏭ Без времени", callback_data="stime:skip"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+    )
     
     await callback.message.edit_text("🕐 Время:", reply_markup=builder.as_markup())
     await callback.answer()
@@ -460,7 +466,12 @@ async def sched_add_time(callback: CallbackQuery, state: FSMContext):
     await state.update_data(scheduled_time=scheduled_time)
     await state.set_state(AddSchedule.description)
     
-    await callback.message.edit_text("📎 Комментарий (или пропусти):", reply_markup=skip_kb("sdesc:skip"))
+    desc_kb = InlineKeyboardBuilder()
+    desc_kb.row(
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data="sdesc:skip"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+    )
+    await callback.message.edit_text("📎 Комментарий (или пропусти):", reply_markup=desc_kb.as_markup())
     await callback.answer()
 
 
@@ -482,7 +493,10 @@ async def _ask_media(message, state, is_callback=False):
     await state.set_state(AddSchedule.media)
     
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="⏭ Без вложений", callback_data="smedia:done"))
+    builder.row(
+        InlineKeyboardButton(text="⏭ Без вложений", callback_data="smedia:done"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+    )
     
     text = "📷 Прикрепи фото, голосовое или файл\n\nМожно несколько — отправляй по одному.\nКогда закончишь — нажми кнопку."
     if is_callback:
@@ -1387,6 +1401,7 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "sched:cancel")
 @router.callback_query(F.data == "content:cancel")
 @router.callback_query(F.data == "tasks:cancel")
+@router.callback_query(F.data == "cancel")
 async def sched_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Отменено", reply_markup=nav_kb())
