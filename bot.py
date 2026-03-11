@@ -27,7 +27,7 @@ import pytz
 from database import init_db, seed_defaults
 from seed import seed as seed_data
 from handlers import (
-    common_router, schedule_router, crm_router,
+    common_router, fallback_router, schedule_router, crm_router,
     finance_router, report_router
 )
 from handlers.common import ADMIN_IDS
@@ -101,12 +101,13 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     
-    # Register routers
+    # Register routers (order matters — fallback must be LAST)
     dp.include_router(common_router)
     dp.include_router(schedule_router)
     dp.include_router(crm_router)
     dp.include_router(finance_router)
     dp.include_router(report_router)
+    dp.include_router(fallback_router)  # catches unhandled messages
     
     # Setup scheduler
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)

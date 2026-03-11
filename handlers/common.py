@@ -297,3 +297,47 @@ async def admin_stats(callback: CallbackQuery):
     
     await callback.message.edit_text(text_msg, reply_markup=back_to_menu_kb(), parse_mode="HTML")
     await callback.answer()
+
+
+# ==================== Fallback Router (include LAST in bot.py!) ====================
+
+fallback_router = Router()
+
+@fallback_router.message()
+async def fallback_message(message: Message, state: FSMContext):
+    """Catch any unhandled text messages — FSM state was likely lost after redeploy"""
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+    
+    from keyboards import main_menu_kb
+    user = await get_or_create_user(
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        full_name=message.from_user.full_name,
+    )
+    await message.answer(
+        "🤔 Не понял. Возможно, бот перезапустился и потерял контекст.\n\nВыбери действие:",
+        reply_markup=main_menu_kb(user.role, user.username or ""),
+        parse_mode="HTML"
+    )
+
+
+@fallback_router.callback_query()
+async def fallback_callback(callback: CallbackQuery, state: FSMContext):
+    """Catch unhandled callbacks"""
+    await state.clear()
+    from keyboards import main_menu_kb
+    user = await get_or_create_user(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+        full_name=callback.from_user.full_name,
+    )
+    try:
+        await callback.message.edit_text(
+            "🤔 Действие устарело. Выбери заново:",
+            reply_markup=main_menu_kb(user.role, user.username or ""),
+        )
+    except Exception:
+        pass
+    await callback.answer()
